@@ -8,21 +8,61 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 import time
 from datetime import datetime
+import random
+from scipy.signal import butter, filtfilt
 
 # Configuration
 PHRASE = "I let the positive overrun the negative"
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 48000
 DURATION = 5 
-TRAIN_SAMPLES = 4
+TRAIN_SAMPLES = 4  # Keep at 4 actual recordings
 VOICE_FOLDER = "user"  # Folder to store voice biometric data
-VOICE_MODEL_FILE = os.path.join(VOICE_FOLDER, "voice_model.pkl")  # Fixed file name for voice model
+VOICE_MODEL_FILE = os.path.join(VOICE_FOLDER, "voice_model.pkl")
 
 # Ensure the voice folder exists
 os.makedirs(VOICE_FOLDER, exist_ok=True)
 
-# Terminal-based audio recording function
+# Noise reduction function
+def reduce_noise(y, sr):
+    """Simple noise reduction using a high-pass filter to remove low frequency noise"""
+    # High pass filter to remove background rumble
+    cutoff = 80  # cutoff frequency in Hz
+    nyquist = 0.5 * sr
+    normal_cutoff = cutoff / nyquist
+    order = 4
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    y_filtered = filtfilt(b, a, y)
+    return y_filtered
+
+# Function to augment audio with extremely subtle modifications
+def augment_audio(audio_file, output_file, augmentation_type='pitch'):
+    """Create minimally augmented version of audio file with extremely subtle changes"""
+    y, sr = librosa.load(audio_file, sr=None)
+    
+    # Apply noise reduction
+    y = reduce_noise(y, sr)
+    
+    if augmentation_type == 'pitch':
+        # Extremely subtle pitch shift (very minimal change)
+        pitch_shift = random.uniform(-0.1, 0.1)  # Reduced from -0.2,0.2 to -0.1,0.1
+        y_augmented = librosa.effects.pitch_shift(y, sr=sr, n_steps=pitch_shift)
+    elif augmentation_type == 'speed':
+        # Extremely subtle speed change
+        speed_factor = random.uniform(0.99, 1.01)  # Reduced from 0.98,1.02 to 0.99,1.01
+        y_augmented = librosa.effects.time_stretch(y, rate=speed_factor)
+    else:
+        # Add extremely tiny amount of noise
+        noise_level = 0.0005  # Reduced from 0.001 to 0.0005
+        noise = np.random.normal(0, noise_level, len(y))
+        y_augmented = y + noise
+        
+    # Save augmented audio
+    sf.write(output_file, y_augmented, sr)
+    return output_file
+
+# Terminal-based audio recording function with noise reduction
 def record_audio(output_file, duration=DURATION, fs=SAMPLE_RATE):
-    """Record audio from terminal and save to file"""
+    """Record audio from terminal and save to file with noise reduction"""
     print(f"\nPlease say: \"{PHRASE}\"")
     print("Recording will start in...")
     
@@ -46,6 +86,10 @@ def record_audio(output_file, duration=DURATION, fs=SAMPLE_RATE):
     sd.wait()
     print("\n✅ Recording complete!")
     
+    # Apply noise reduction
+    audio_data = audio_data.flatten()
+    audio_data = reduce_noise(audio_data, fs)
+    
     # Save audio to file
     sf.write(output_file, audio_data, fs)
     print(f"✅ Saved to {output_file}")
@@ -56,6 +100,9 @@ def record_audio(output_file, duration=DURATION, fs=SAMPLE_RATE):
 def extract_enhanced_features(file_path, n_mfcc=20):
     """Extract acoustic features from audio file"""
     y, sr = librosa.load(file_path, sr=None)
+    
+    # Apply noise reduction
+    y = reduce_noise(y, sr)
     
     # Extract MFCCs (Mel-frequency cepstral coefficients)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
@@ -84,6 +131,7 @@ def register_voice_biometrics(train_dir=os.path.join(VOICE_FOLDER, "train")):
     os.makedirs(train_dir, exist_ok=True)
     
     features = []
+    recorded_files = []
     
     # Record training samples
     for i in range(1, TRAIN_SAMPLES + 1):
@@ -93,6 +141,7 @@ def register_voice_biometrics(train_dir=os.path.join(VOICE_FOLDER, "train")):
         
         try:
             record_audio(output_file)
+            recorded_files.append(output_file)
             
             # Extract features
             user_features = extract_enhanced_features(output_file)
@@ -104,7 +153,25 @@ def register_voice_biometrics(train_dir=os.path.join(VOICE_FOLDER, "train")):
             i -= 1  # Retry this recording
             continue
     
-    if len(features) < 2:
+    # Create augmented samples
+    if len(recorded_files) >= 2:
+        print("\nCreating augmented samples to enhance voice profile...")
+        
+        # Create pitch-shifted version of last recording
+        aug_file1 = os.path.join(train_dir, f"train_aug1_{timestamp}.wav")
+        augment_audio(recorded_files[-1], aug_file1, 'pitch')
+        user_features = extract_enhanced_features(aug_file1)
+        features.append(user_features)
+        print(f"✅ Created augmented sample 1 (pitch shift)")
+        
+        # Create speed-modified version of second-to-last recording
+        aug_file2 = os.path.join(train_dir, f"train_aug2_{timestamp}.wav")
+        augment_audio(recorded_files[-2], aug_file2, 'speed')
+        user_features = extract_enhanced_features(aug_file2)
+        features.append(user_features)
+        print(f"✅ Created augmented sample 2 (speed modification)")
+    
+    if len(features) < 4:
         print("❌ Not enough valid recordings to create a voice profile")
         return False
         
@@ -131,7 +198,7 @@ def register_voice_biometrics(train_dir=os.path.join(VOICE_FOLDER, "train")):
     try:
         gmm.fit(features_scaled)
         
-        # Save both the model and scaler together in the fixed location
+        # Remove dynamic threshold calculation and just save the model, scaler and phrase
         with open(VOICE_MODEL_FILE, "wb") as f:
             pickle.dump((gmm, scaler, PHRASE), f)
         print("DONE!")

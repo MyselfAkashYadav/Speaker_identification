@@ -7,14 +7,16 @@ import soundfile as sf
 from datetime import datetime
 import time
 import shutil  # For directory cleanup
+from scipy.signal import butter, filtfilt  # For noise reduction
 
 # Configuration - must match voice3.py
 PHRASE = "I let the positive overrun the negative"
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 48000
 DURATION = 5
 TEST_SAMPLES = 2
 VOICE_FOLDER = "user"  # Folder to store voice biometric data
 VOICE_MODEL_FILE = os.path.join(VOICE_FOLDER, "voice_model.pkl")
+VERIFICATION_THRESHOLD = -220.0  # Fixed threshold for voice verification
 
 # Terminal-based audio recording function
 def record_audio(output_file, duration=DURATION, fs=SAMPLE_RATE):
@@ -48,10 +50,25 @@ def record_audio(output_file, duration=DURATION, fs=SAMPLE_RATE):
     
     return output_file
 
+# Noise reduction function
+def reduce_noise(y, sr):
+    """Simple noise reduction using a high-pass filter to remove low frequency noise"""
+    # High pass filter to remove background rumble
+    cutoff = 80  # cutoff frequency in Hz
+    nyquist = 0.5 * sr
+    normal_cutoff = cutoff / nyquist
+    order = 4
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    y_filtered = filtfilt(b, a, y)
+    return y_filtered
+
 # Extract enhanced features
 def extract_enhanced_features(file_path, n_mfcc=20):
     """Extract acoustic features from audio file"""
     y, sr = librosa.load(file_path, sr=None)
+    
+    # Apply noise reduction
+    y = reduce_noise(y, sr)
     
     # Extract MFCCs
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
@@ -105,12 +122,17 @@ def verify_voice_biometrics():
         with open(VOICE_MODEL_FILE, "rb") as model_file:
             model_data = pickle.load(model_file)
             
-        if len(model_data) == 3:
+        if len(model_data) == 4:
+            gmm, scaler, stored_phrase, _ = model_data  # Ignore saved threshold
+        elif len(model_data) == 3:
             gmm, scaler, stored_phrase = model_data
         else:
             # Handle older model formats
             gmm, scaler = model_data[:2]
             stored_phrase = PHRASE
+        
+        # Always use the fixed threshold
+        threshold = VERIFICATION_THRESHOLD
         print("DONE!")
             
     except Exception as e:
@@ -152,13 +174,10 @@ def verify_voice_biometrics():
     
     if not scores:
         print("❌ No valid recordings for verification")
-        # Clean up even if verification failed
-        # cleanup_test_files(test_dir)
         return False
     
     # Make verification decision
     avg_score = sum(scores) / len(scores)
-    threshold = -210.0  # Adjust based on testing
     
     print("\nCalculating final result...")
     time.sleep(1)  # Brief pause for effect
@@ -168,9 +187,6 @@ def verify_voice_biometrics():
     
     # Determine result
     result = avg_score >= threshold
-    
-    # Clean up test files regardless of verification result
-    # cleanup_test_files(test_dir)
     
     return result
 
